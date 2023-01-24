@@ -17,3 +17,5 @@ rustflags = ["-C","target-cpu=skylake"]
 chrono = "0.4.23"
 itertools = "0.10.5"
 linya = "0.3.0"
+rustdate = { git="https://github.com/TuuKeZu/rust-auto-update.git"}
+tokio = {version="1.24.2", features=["full"]}

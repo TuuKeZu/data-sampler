@@ -17,7 +17,8 @@ const DISPLACEMENT_FIELD: &'static str = "Displacement_A_mm";
 
 type Dataset = HashMap<usize, ([f32; 2], usize)>;
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     println!("tAnalyzer v{}", VERSION);
     println!("<github>");
     println!("---------------");
