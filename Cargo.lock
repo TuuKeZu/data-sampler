@@ -278,9 +278,14 @@ dependencies = [
  "anyhow",
  "chrono",
  "itertools",
+ "linecount",
  "linya",
  "rustdate",
+ "serde",
+ "serde_derive",
+ "serde_json",
  "tokio",
+ "toml",
 ]
 
 [[package]]
@@ -600,6 +605,12 @@ name = "libc"
 version = "0.2.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79"
+
+[[package]]
+name = "linecount"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5d5a4a243b9cf052d37af99679cc93b08a791f444a4a1b21bb4efcaf01847d8"
 
 [[package]]
 name = "link-cplusplus"

@@ -1,5 +1,7 @@
+pub mod utility;
+
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, self};
 use std::io::{self, prelude::*, BufReader, stdin, Write, BufWriter};
 use std::time::Instant;
 
@@ -9,13 +11,11 @@ use chrono;
 use rustdate::update::UpdateBuilder;
 use rustdate::utility::OsType;
 
+use crate::utility::get_config;
+
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUFFER: i32 = i32::pow(2, 14);
-const LIMIT: usize = 20000000;
-
-const PRESSURE_THRESHOLD: f32 = 101.;
-const PRESSURE_FIELD: &'static str = "F_pri_pressure_bar";
-const DISPLACEMENT_FIELD: &'static str = "Displacement_A_mm";
 
 type Dataset = HashMap<usize, ([f32; 2], usize)>;
 
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     UpdateBuilder::new()
         .set_verbose(true)
         .set_github_user("TuuKeZu")
-        .set_github_repo("github-actions")
+        .set_github_repo("data-sampler")
         .set_binary_path(OsType::Windows, "x86_64-pc-windows-gnu.zip")
         .set_binary_path(OsType::Linux, "x86_64-unknown-linux-musl.zip")
         .check_for_updates()
@@ -33,30 +33,13 @@ async fn main() -> anyhow::Result<()> {
     println!("tAnalyzer v{}", VERSION);
     println!("<github>");
     println!("---------------");
-    println!("Please input the name of the input file [.trd]:");
+    let path = select_file()?;
 
-    let mut file_name = String::new();
-    stdin().read_line(&mut file_name)?;
+    if path.is_none() {
+        return Ok(());
+    }
 
-    let file = File::open(format!("input/{}", file_name.trim().clone()))?;
-    let metadata = file.metadata().unwrap();
-    let size = metadata.len();
-    println!("---------------");
-    println!("File:");
-    println!("> name: {}", file_name.trim());
-    println!("> size: {} bytes", size);
-    println!("> type: {:?}", metadata.file_type());
-    println!("Constants:");
-    println!("> buffer size: {:#?} bytes", BUFFER);
-    println!("> pressure threshold: {} bar", PRESSURE_THRESHOLD);
-    println!("> pressure field: {:?}", PRESSURE_FIELD);
-    println!("> displacement field: {:?}", DISPLACEMENT_FIELD);
-    println!("---------------");
-    println!("Proceed? [enter / ctrl + c]:");
-    stdin().read_line(&mut String::new())?;
-    println!("> Ok");
-
-    let dataset = map_data(file)?;
+    let dataset = map_data(path.unwrap())?;
     
     write_file(dataset)?;
 
@@ -67,12 +50,73 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn map_data(file: File) -> Result<Dataset, io::Error> {
-    let metadata = file.metadata().unwrap();
-    let size = metadata.len();
+fn select_file() -> Result<Option<String>, io::Error> {
+    let files = fs::read_dir("input/")?;
+    let mut count = 0;
+    let mut paths: Vec<String> = Vec::new();
+
+    println!("Please select the file you want to analyze from '/input' folder");
+    println!("---------------");
+
+    for (i, file) in files.enumerate() {
+        let data = file?.path();
+        let path = data.to_str().unwrap().to_string();
+        println!("> {i}: {}", &path);
+        paths.push(path);
+
+        count += 1;
+    }
+
+    if count == 0 {
+        return Ok(None);
+    }
+
+    if count == 1 {
+        return Ok(Some(paths[0].clone()));
+    }
+
+    println!("---------------");
+    println!("Enter an integer between [0..{}]", count - 1);
+
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    
+    let idx = input.trim().parse::<usize>();
+
+    if idx.is_err() {
+        println!("> The input must be a valid integer");
+        return Ok(None);
+    }
+    let idx = idx.unwrap();
+
+    if idx > count - 1 {
+        println!("> The input must be in range [0..{}]", count - 1);
+        return Ok(None);
+    }
+
+    Ok(Some(paths[idx].clone()))
+}
+
+fn map_data(path: String) -> Result<Dataset, io::Error> {
+    let config = get_config()?;
+    println!("---------------");
+    println!("> Displacement field: {:#?}", config.displacement_field);
+    println!("> Pressure field: {:#?}", config.pressure_field);
+    println!("> [min-max] will be calculated for: {:#?}", config.min_max_field);
+    println!("> Pressure threshold: {:#?}", config.pressure_threshold);
+    println!("---------------");
+
+    println!("> Opening {}", &path);
+    let file = File::open(path.clone())?;
+
+    let lines = linecount::count_lines(file)?;
+    println!("> Found {} datapoints", lines);
+
+    let file = File::open(path)?;
 
     let t_start = Instant::now();
     // Time the execution time
+
     let mut last : Option<f32> = None;
     let mut relative_highest: [f32; 2] = [0., 0.];
     let mut j: usize = 1;
@@ -80,10 +124,9 @@ fn map_data(file: File) -> Result<Dataset, io::Error> {
     let mut dataset: Dataset = HashMap::new();
     
     let reader = BufReader::with_capacity(BUFFER as usize, file);
-    println!("> Initilized BufReader with {} bytes of memory", BUFFER);
 
     let mut progress = Progress::new();
-    let bar: Bar = progress.bar(size as usize / 260, "> Analyzing");
+    let bar: Bar = progress.bar(lines, "> Analyzing");
 
 
     for (i, line) in reader.lines().enumerate() {
@@ -92,15 +135,17 @@ fn map_data(file: File) -> Result<Dataset, io::Error> {
         let mut chunks = set.chunks(2);
 
         if last.is_none() {
-            let pr = chunks.find(|pair| pair.get(0).unwrap() == &PRESSURE_FIELD).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-            if pr > PRESSURE_THRESHOLD {
-                let v = chunks.find(|pair| pair.get(0).unwrap() == &DISPLACEMENT_FIELD).unwrap().get(1).unwrap().parse::<f32>().unwrap();
+            let pr = chunks.find(|pair| pair.get(0).unwrap() == &config.pressure_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
+            if pr > config.pressure_threshold {
+                let v = chunks.find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
                 last = Some(v);
             }
 
         } else {
-            let value = chunks.find(|pair| pair.get(0).unwrap() == &DISPLACEMENT_FIELD).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-            let a = if value.is_sign_positive() {relative_highest.get_mut(0).unwrap()} else {relative_highest.get_mut(1).unwrap()};
+            let displacement = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
+            let value = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.min_max_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
+
+            let a = if displacement.is_sign_positive() {relative_highest.get_mut(0).unwrap()} else {relative_highest.get_mut(1).unwrap()};
 
             if f32::abs(value) > f32::abs(*a) {
                 *a = value;
@@ -108,7 +153,7 @@ fn map_data(file: File) -> Result<Dataset, io::Error> {
             
             //let _cycle = (j as f32) * 0.2 / 33.33 % 1.;
 
-            if last.unwrap().is_sign_positive() && value.is_sign_negative() {
+            if last.unwrap().is_sign_positive() && displacement.is_sign_negative() {
                 let count = dataset.keys().len() + 1;
                 if j > 150 {
 
@@ -122,19 +167,18 @@ fn map_data(file: File) -> Result<Dataset, io::Error> {
 
             }
             
-            last = Some(value);
+            last = Some(displacement);
             j += 1;
 
-            if i % (LIMIT / 20) == 0 {
+            if i % (lines / 20) == 0 {
                 progress.set_and_draw(&bar, i);
             }
-            
-            if i > LIMIT {
-                break;
-            }
+
             
         }
     }
+    progress.set_and_draw(&bar, lines);
+
     println!("---------------");
     println!("> Analyzed the data in {}ms", t_start.elapsed().as_millis());
 
@@ -148,8 +192,6 @@ fn write_file(dataset: Dataset) -> Result<(), io::Error> {
     let file = File::create(format!("output/output-{}.trd", chrono::offset::Local::now().format("%Y-%m-%d-%H-%M-%S")))?;
     let mut writer = BufWriter::with_capacity(BUFFER as usize, file);
 
-    println!("> Initilized BufWriter with {} bytes of memory", BUFFER);
-
     let mut progress = Progress::new();
     let bar: Bar = progress.bar(size, "> Writing output.trd");
     
@@ -161,5 +203,7 @@ fn write_file(dataset: Dataset) -> Result<(), io::Error> {
             progress.set_and_draw(&bar, i + 1);
         }
     };
+
+    progress.set_and_draw(&bar, size);
     Ok(())
 }

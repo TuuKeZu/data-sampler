@@ -1,0 +1,5 @@
+[config]
+pressure_field = "F_pri_pressure_bar"
+displacement_field = "Displacement_A_mm"
+min_max_field = "Displacement_A_mm"
+pressure_threshold = 101.0
