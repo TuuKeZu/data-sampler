@@ -6,6 +6,8 @@ use std::time::Instant;
 use itertools::Itertools;
 use linya::{Bar, Progress};
 use chrono;
+use rustdate::update::UpdateBuilder;
+use rustdate::utility::OsType;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUFFER: i32 = i32::pow(2, 14);
@@ -18,7 +20,16 @@ const DISPLACEMENT_FIELD: &'static str = "Displacement_A_mm";
 type Dataset = HashMap<usize, ([f32; 2], usize)>;
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> anyhow::Result<()> {
+    UpdateBuilder::new()
+        .set_verbose(true)
+        .set_github_user("TuuKeZu")
+        .set_github_repo("github-actions")
+        .set_binary_path(OsType::Windows, "x86_64-pc-windows-gnu.zip")
+        .set_binary_path(OsType::Linux, "x86_64-unknown-linux-musl.zip")
+        .check_for_updates()
+        .await?;
+
     println!("tAnalyzer v{}", VERSION);
     println!("<github>");
     println!("---------------");
