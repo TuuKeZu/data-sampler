@@ -1,6 +1,7 @@
 pub mod utility;
 
 use std::collections::HashMap;
+use std::default;
 use std::fs::{File, self};
 use std::io::{self, prelude::*, BufReader, stdin, Write, BufWriter};
 use std::time::Instant;
@@ -17,7 +18,37 @@ use crate::utility::get_config;
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUFFER: i32 = i32::pow(2, 14);
 
-type Dataset = HashMap<usize, ([f32; 2], usize)>;
+const MAX: usize = 2000;
+
+type Dataset = HashMap<usize, (MinMaxValue, usize)>;
+
+
+struct MinMaxValue {
+    min: f32,
+    max: f32
+}
+
+impl Default for MinMaxValue {
+    fn default() -> Self {
+        Self {
+            min: f32::INFINITY,
+            max: -f32::INFINITY
+        }
+    }
+}
+
+impl MinMaxValue {
+    /// Insert value if it's greater than max or lesser than min
+    fn insert(&mut self, value: f32) { 
+        if value > self.max {
+            self.max = value;
+        }
+
+        if value < self.min {
+            self.min = value;
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,22 +62,22 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("tAnalyzer v{}", VERSION);
-    println!("<github>");
+    println!("<https://github.com/TuuKeZu/data-sampler.git>");
     println!("---------------");
     let path = select_file()?;
 
     if path.is_none() {
+        println!("> No files found in '/input' folder");
         return Ok(());
-    }
+    } 
 
     let dataset = map_data(path.unwrap())?;
-    
     write_file(dataset)?;
 
     println!("---------------");
     println!("Saved output.trd");
     println!("Done!");
-
+    
     Ok(())
 }
 
@@ -118,7 +149,7 @@ fn map_data(path: String) -> Result<Dataset, io::Error> {
     // Time the execution time
 
     let mut last : Option<f32> = None;
-    let mut relative_highest: [f32; 2] = [0., 0.];
+    let mut relative_highest = MinMaxValue::default();
     let mut j: usize = 1;
     
     let mut dataset: Dataset = HashMap::new();
@@ -137,30 +168,24 @@ fn map_data(path: String) -> Result<Dataset, io::Error> {
         if last.is_none() {
             let pr = chunks.find(|pair| pair.get(0).unwrap() == &config.pressure_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
             if pr > config.pressure_threshold {
-                let v = chunks.find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-                last = Some(v);
+                let displacement = chunks.find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
+                last = Some(displacement);
             }
 
         } else {
             let displacement = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
             let value = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.min_max_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
 
-            let a = if displacement.is_sign_positive() {relative_highest.get_mut(0).unwrap()} else {relative_highest.get_mut(1).unwrap()};
-
-            if f32::abs(value) > f32::abs(*a) {
-                *a = value;
-            }
+            
+            relative_highest.insert(value);
             
             //let _cycle = (j as f32) * 0.2 / 33.33 % 1.;
 
             if last.unwrap().is_sign_positive() && displacement.is_sign_negative() {
                 let count = dataset.keys().len() + 1;
                 if j > 150 {
-
-                    if relative_highest.iter().all(|x| x != &0.) {
-                        dataset.insert(count, (relative_highest, j));
-                        relative_highest = [0., 0.];
-                    }
+                    dataset.insert(count, (relative_highest, j));
+                    relative_highest = MinMaxValue::default();
                 }
 
                 j = 3;
@@ -174,6 +199,9 @@ fn map_data(path: String) -> Result<Dataset, io::Error> {
                 progress.set_and_draw(&bar, i);
             }
 
+            if i > MAX {
+                break;
+            }
             
         }
     }
@@ -197,7 +225,7 @@ fn write_file(dataset: Dataset) -> Result<(), io::Error> {
     
     for (i, k) in dataset.keys().sorted().enumerate() {
         let val = dataset.get(k).unwrap();
-        writer.write(format!("{};min;{};max;{};cycles;{};\n", i + 1, val.0.get(0).unwrap(), val.0.get(1).unwrap(), val.1).as_bytes())?;
+        writer.write(format!("{};min;{};max;{};cycles;{};\n", i + 1, val.0.min, val.0.max, val.1).as_bytes())?;
 
         if i % (size / d) == 0 {
             progress.set_and_draw(&bar, i + 1);
