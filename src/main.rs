@@ -1,7 +1,6 @@
 pub mod utility;
 
 use std::collections::HashMap;
-use std::default;
 use std::fs::{File, self};
 use std::io::{self, prelude::*, BufReader, stdin, Write, BufWriter};
 use std::time::Instant;
@@ -197,10 +196,6 @@ fn map_data(path: String) -> Result<Dataset, io::Error> {
 
             if i % (lines / 20) == 0 {
                 progress.set_and_draw(&bar, i);
-            }
-
-            if i > MAX {
-                break;
             }
             
         }
