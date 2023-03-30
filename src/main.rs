@@ -2,14 +2,10 @@ pub mod utility;
 pub mod analyzing;
 
 
-use core::panic;
 use std::any::{self, Any};
 use std::fs::{File, self};
 use std::io::{self, stdin, Write, BufWriter};
 use std::time::Duration;
-use itertools::Itertools;
-use linya::{Bar, Progress};
-use chrono;
 use rustdate::update::UpdateBuilder;
 use rustdate::utility::{OsType, Data};
 use tokio::sync::RwLock;
@@ -84,8 +80,7 @@ impl Application {
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         clear();
-        self.handle_update().await?;
-        std::thread::sleep(Duration::from_secs(1));
+        //self.handle_update().await?;
 
         loop {
             let mut state_lock = self.state.write().await;
@@ -134,7 +129,7 @@ impl Application {
             .set_binary_path(OsType::Linux, "x86_64-unknown-linux-musl.zip")
             .check_for_updates()
             .await?;
-
+        std::thread::sleep(Duration::from_secs(1));
         Ok(())
     }
 
