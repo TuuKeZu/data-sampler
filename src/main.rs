@@ -1,232 +1,245 @@
 pub mod utility;
+pub mod analyzing;
 
-use std::collections::HashMap;
+
+use core::panic;
+use std::any::{self, Any};
 use std::fs::{File, self};
-use std::io::{self, prelude::*, BufReader, stdin, Write, BufWriter};
-use std::time::Instant;
-
+use std::io::{self, stdin, Write, BufWriter};
+use std::time::Duration;
 use itertools::Itertools;
 use linya::{Bar, Progress};
 use chrono;
 use rustdate::update::UpdateBuilder;
-use rustdate::utility::OsType;
+use rustdate::utility::{OsType, Data};
+use tokio::sync::RwLock;
 
-use crate::utility::get_config;
-
+use crate::analyzing::{Dataset, BUFFER};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const BUFFER: i32 = i32::pow(2, 14);
+const BACK_KEY: &str = "b";
 
-const MAX: usize = 2000;
+type State = StateChange<dyn Any>;
 
-type Dataset = HashMap<usize, (MinMaxValue, usize)>;
-
-
-struct MinMaxValue {
-    min: f32,
-    max: f32
+#[derive(Debug)]
+pub struct StateChange<T : ?Sized> {
+    pub change: Option<ApplicationState>,
+    pub value: Box<T>
 }
 
-impl Default for MinMaxValue {
-    fn default() -> Self {
+impl StateChange<dyn Any> {
+    pub fn new<T : 'static>(value: T) -> Self {
         Self {
-            min: f32::INFINITY,
-            max: -f32::INFINITY
+            change: None,
+            value: Box::new(value)
+        }
+    }
+
+    pub fn switch<T : 'static>(value: T, state: ApplicationState) -> Self {
+        Self {
+            change: Some(state),
+            value: Box::new(value)
         }
     }
 }
 
-impl MinMaxValue {
-    /// Insert value if it's greater than max or lesser than min
-    fn insert(&mut self, value: f32) { 
-        if value > self.max {
-            self.max = value;
+#[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ApplicationState {
+    Menu,
+    Selecting,
+    MinMax,
+    Close,
+}
+
+impl ApplicationState {
+    pub fn menu_options() -> Vec<ApplicationState> {
+        vec![
+            Self::MinMax,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ApplicationState::Menu => "Back to Menu",
+            ApplicationState::Selecting => "Open a different File",
+            ApplicationState::Close => "Exit the analyzer",
+            ApplicationState::MinMax => "Analyze minimium and maximium values",
+            _ => ""
+        }
+    }
+}
+
+pub struct Application {
+    pub state: RwLock<ApplicationState>,
+    pub open_file: Option<String>,
+}
+
+impl Application {
+    pub fn new() -> Self {
+        Self {
+            state: RwLock::new(ApplicationState::Selecting),
+            open_file: None,
+        }
+    }
+
+    pub async fn run(mut self) -> anyhow::Result<()> {
+        clear();
+        self.handle_update().await?;
+        std::thread::sleep(Duration::from_secs(1));
+
+        loop {
+            let mut state_lock = self.state.write().await;
+            
+            match *state_lock {
+                ApplicationState::Menu => {
+                    let a = self.menu().await?;
+
+                    if let Some(target) = a.change {
+                        *state_lock = target;
+                    }
+                },
+                ApplicationState::Selecting => {
+                    let a = self.select_file().await?;
+
+                    let path = a.value.downcast_ref::<String>().unwrap();
+                    if !path.is_empty() { self.open_file = Some(path.clone()); }
+
+                    if let Some(target) = a.change {
+                        *state_lock = target;
+                    }
+                },
+                ApplicationState::MinMax => {
+                    if let Some(path) = self.open_file.clone() {
+                        let a = self.min_max_data(path).await?;
+
+                        if let Some(target) = a.change {
+                            *state_lock = target;
+                        }
+                    }
+                },
+                ApplicationState::Close => { break; },
+            }
+
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(())
+    }
+
+    pub async fn handle_update(&self) -> anyhow::Result<()> {
+        UpdateBuilder::new()
+            .set_verbose(true)
+            .set_github_user("TuuKeZu")
+            .set_github_repo("data-sampler")
+            .set_binary_path(OsType::Windows, "x86_64-pc-windows-gnu.zip")
+            .set_binary_path(OsType::Linux, "x86_64-unknown-linux-musl.zip")
+            .check_for_updates()
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn menu(&self) -> anyhow::Result<State> {
+        clear();
+        
+        println!("Current file: {}", self.open_file.as_ref().unwrap());
+        let count = ApplicationState::menu_options().len();
+        
+        for(i, option) in ApplicationState::menu_options().iter().map(|o| o.label()).enumerate() {
+            println!("[{}]: {}", (i + 1), option);
+        }
+        
+        back();
+        println!("---------------");
+    
+        let mut input = String::new();
+        stdin().read_line(&mut input)?;
+
+        if input.trim() == BACK_KEY { return Ok(StateChange::switch((), ApplicationState::Selecting)); }
+        
+        let mut idx = input.trim().parse::<usize>();
+    
+        while !input.is_empty() && (idx.is_err() || !(1..count + 1).contains(&idx.clone().unwrap())) {
+            println!("Please enter a valid key");
+    
+            input = String::new();
+            stdin().read_line(&mut input)?;
+
+            if input.trim() == BACK_KEY { return Ok(StateChange::switch((), ApplicationState::Selecting)); }
+
+            idx = input.trim().parse::<usize>();
         }
 
-        if value < self.min {
-            self.min = value;
+        Ok(StateChange::switch((), ApplicationState::MinMax))
+    }
+
+    async fn select_file(&self) -> anyhow::Result<State> {
+        clear();
+
+        let files = fs::read_dir("input/")?;
+        let mut count = 0;
+        let mut paths: Vec<String> = Vec::new();
+    
+        println!("Please select the file you want to analyze from '/input' folder");
+        println!("---------------");
+        
+        for (i, file) in files.enumerate() {
+            let data = file?.path();
+            let path = data.to_str().unwrap().to_string();
+            println!("> [{i}]: {}", &path);
+            paths.push(path);
+            
+            count += 1;
         }
+        
+        if count == 0 {
+            println!("No Files found");
+            return Ok(StateChange::switch(String::new(), ApplicationState::Menu));
+        }
+    
+        let mut input = String::new();
+        stdin().read_line(&mut input)?;
+        
+        let idx = input.trim().parse::<usize>();
+        while idx.clone().is_err() || idx.clone().unwrap() > count - 1 {
+            println!("> The input must be a valid integer");
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+        }
+    
+        Ok(StateChange::switch(paths[idx.unwrap()].clone(), ApplicationState::Menu))
+    }
+
+    pub async fn min_max_data(&self, path: String)-> anyhow::Result<State> {
+        clear();
+
+        let data: Dataset = analyzing::map_data(path)?;
+        analyzing::write_file(data)?;
+
+        println!("> Successfully analyzed file.");
+        println!("[Press any key to continue]");
+
+        let mut input = String::new();
+        stdin().read_line(&mut input)?;
+
+
+        Ok(StateChange::switch((), ApplicationState::Menu))
     }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    UpdateBuilder::new()
-        .set_verbose(true)
-        .set_github_user("TuuKeZu")
-        .set_github_repo("data-sampler")
-        .set_binary_path(OsType::Windows, "x86_64-pc-windows-gnu.zip")
-        .set_binary_path(OsType::Linux, "x86_64-unknown-linux-musl.zip")
-        .check_for_updates()
-        .await?;
+    let app = Application::new();
+    app.run().await?;
 
+    Ok(())
+}
+
+fn back() {
+    println!("[{}] {}", BACK_KEY, ApplicationState::Selecting.label());
+}
+
+fn clear() {
+    print!("{}[2J", 27 as char);
     println!("tAnalyzer v{}", VERSION);
-    println!("<https://github.com/TuuKeZu/data-sampler.git>");
     println!("---------------");
-    let path = select_file()?;
-
-    if path.is_none() {
-        println!("> No files found in '/input' folder");
-        return Ok(());
-    } 
-
-    let dataset = map_data(path.unwrap())?;
-    write_file(dataset)?;
-
-    println!("---------------");
-    println!("Saved output.trd");
-    println!("Done!");
-    
-    Ok(())
-}
-
-fn select_file() -> Result<Option<String>, io::Error> {
-    let files = fs::read_dir("input/")?;
-    let mut count = 0;
-    let mut paths: Vec<String> = Vec::new();
-
-    println!("Please select the file you want to analyze from '/input' folder");
-    println!("---------------");
-
-    for (i, file) in files.enumerate() {
-        let data = file?.path();
-        let path = data.to_str().unwrap().to_string();
-        println!("> {i}: {}", &path);
-        paths.push(path);
-
-        count += 1;
-    }
-
-    if count == 0 {
-        return Ok(None);
-    }
-
-    if count == 1 {
-        return Ok(Some(paths[0].clone()));
-    }
-
-    println!("---------------");
-    println!("Enter an integer between [0..{}]", count - 1);
-
-    let mut input = String::new();
-    stdin().read_line(&mut input)?;
-    
-    let idx = input.trim().parse::<usize>();
-
-    if idx.is_err() {
-        println!("> The input must be a valid integer");
-        return Ok(None);
-    }
-    let idx = idx.unwrap();
-
-    if idx > count - 1 {
-        println!("> The input must be in range [0..{}]", count - 1);
-        return Ok(None);
-    }
-
-    Ok(Some(paths[idx].clone()))
-}
-
-fn map_data(path: String) -> Result<Dataset, io::Error> {
-    let config = get_config()?;
-    println!("---------------");
-    println!("> Displacement field: {:#?}", config.displacement_field);
-    println!("> Pressure field: {:#?}", config.pressure_field);
-    println!("> [min-max] will be calculated for: {:#?}", config.min_max_field);
-    println!("> Pressure threshold: {:#?}", config.pressure_threshold);
-    println!("---------------");
-
-    println!("> Opening {}", &path);
-    let file = File::open(path.clone())?;
-
-    let lines = linecount::count_lines(file)?;
-    println!("> Found {} datapoints", lines);
-
-    let file = File::open(path)?;
-
-    let t_start = Instant::now();
-    // Time the execution time
-
-    let mut last : Option<f32> = None;
-    let mut relative_highest = MinMaxValue::default();
-    let mut j: usize = 1;
-    
-    let mut dataset: Dataset = HashMap::new();
-    
-    let reader = BufReader::with_capacity(BUFFER as usize, file);
-
-    let mut progress = Progress::new();
-    let bar: Bar = progress.bar(lines, "> Analyzing");
-
-
-    for (i, line) in reader.lines().enumerate() {
-        let data = line?;
-        let set = data.split(";").collect::<Vec<&str>>();
-        let mut chunks = set.chunks(2);
-
-        if last.is_none() {
-            let pr = chunks.find(|pair| pair.get(0).unwrap() == &config.pressure_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-            if pr > config.pressure_threshold {
-                let displacement = chunks.find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-                last = Some(displacement);
-            }
-
-        } else {
-            let displacement = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.displacement_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-            let value = chunks.clone().find(|pair| pair.get(0).unwrap() == &config.min_max_field).unwrap().get(1).unwrap().parse::<f32>().unwrap();
-
-            
-            relative_highest.insert(value);
-            
-            //let _cycle = (j as f32) * 0.2 / 33.33 % 1.;
-
-            if last.unwrap().is_sign_positive() && displacement.is_sign_negative() {
-                let count = dataset.keys().len() + 1;
-                if j > 150 {
-                    dataset.insert(count, (relative_highest, j));
-                    relative_highest = MinMaxValue::default();
-                }
-
-                j = 3;
-
-            }
-            
-            last = Some(displacement);
-            j += 1;
-
-            if i % (lines / 20) == 0 {
-                progress.set_and_draw(&bar, i);
-            }
-            
-        }
-    }
-    progress.set_and_draw(&bar, lines);
-
-    println!("---------------");
-    println!("> Analyzed the data in {}ms", t_start.elapsed().as_millis());
-
-    Ok(dataset)
-}
-
-fn write_file(dataset: Dataset) -> Result<(), io::Error> {
-    let size = dataset.len();
-    let d = if size < 20 {size} else {20};
-
-    let file = File::create(format!("output/output-{}.trd", chrono::offset::Local::now().format("%Y-%m-%d-%H-%M-%S")))?;
-    let mut writer = BufWriter::with_capacity(BUFFER as usize, file);
-
-    let mut progress = Progress::new();
-    let bar: Bar = progress.bar(size, "> Writing output.trd");
-    
-    for (i, k) in dataset.keys().sorted().enumerate() {
-        let val = dataset.get(k).unwrap();
-        writer.write(format!("{};min;{};max;{};cycles;{};\n", i + 1, val.0.min, val.0.max, val.1).as_bytes())?;
-
-        if i % (size / d) == 0 {
-            progress.set_and_draw(&bar, i + 1);
-        }
-    };
-
-    progress.set_and_draw(&bar, size);
-    Ok(())
 }
